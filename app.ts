@@ -1,6 +1,6 @@
 import express from 'express';
 import graphqlHTTP from 'express-graphql';
-import { GraphQLSchema, GraphQLObjectType, GraphQLList, GraphQLString } from 'graphql';
+import { makeExecutableSchema } from 'graphql-tools';
 
 const citizens = [
     {
@@ -22,89 +22,75 @@ const citizens = [
     },
 ];
 
-const Permission = new GraphQLObjectType({
-    name: 'Permission',
-    fields: () => ({
-        id: { type: GraphQLString },
-        party: { type: GraphQLString },
-        data: { type: GraphQLString },
-        purpose: { type: GraphQLString },
-    })
-})
+const typeDefs = `
+    enum State {
+        GRANTED
+        DENIED
+    }
 
-const Citizen = new GraphQLObjectType({
-    name: 'Citizen',
-    fields: () => ({
-        name: { type: GraphQLString },
-        email: { type: GraphQLString },
-        permissions: {
-            type: GraphQLList(Permission)
-        },
-        permission: {
-            type: GraphQLList(Permission),
-            args: {
-                purpose: { type: GraphQLString },
-            },
-            resolve: (root, { purpose }) => {
-                return root.permissions
-                    .filter((permission: Permission) => permission.purpose === purpose);
-            }
-        }
-    })
-})
+    type Permission {
+        id: String
+        party: String
+        data: String
+        purpose: String
+        state: State
+    }
 
-const Query = new GraphQLObjectType({
-    name: 'Query',
-    fields: () => ({
-        citizens: {
-            type: GraphQLList(Citizen),
-            resolve: () => citizens
-        },
+    type Citizen {
+        name: String
+        email: String
+        reference: String
+        permissions: [Permission]
+        permission (state: State!): [Permission]
+    }
 
-        citizen: {
-            type: Citizen,
-            args: {
-                ref: { type: GraphQLString }
-            },
-            resolve: (root, { ref }, context, info) => {
-                return citizens.find(citizen => citizen.reference === ref)
-            }
-        }
-    })
-})
+    type Query {
+        citizens: [Citizen]
+        citizen (reference: String!): Citizen
+    }
 
-const schema = new GraphQLSchema({
-    query: Query
-})
-
-enum State {
-    GRANTED,
-    DENIED
-}
+    schema {
+        query: Query
+    }
+`
 
 interface Citizen {
-    ref: String
+    reference: string;
+    permissions: Permission[]
 }
 
 interface Permission {
-    purpose: String
-    state: State
+    state: State;
 }
 
-const root = {
-    citizens: () => citizens,
-
-    citizen: ({ ref }: Citizen) =>
-        citizens.find(citizen => citizen.reference === ref),
+enum State {
+    GRANTED,
+    DENIED,
 }
+
+const resolvers = {
+    Query: {
+        citizens: () => citizens,
+        
+        citizen: (_: any, { reference }: Citizen) =>
+            citizens.find(citizen => citizen.reference === reference)
+    },
+
+    Citizen: {
+        permission: ({ permissions }: Citizen, { state }: Permission) =>
+            permissions.filter(permission => permission.state === state)
+    }
+}
+
+const schema = makeExecutableSchema({
+    typeDefs,
+    resolvers,
+})
 
 export default async () => {
     const app = express();
 
-    app.use('/graphql', graphqlHTTP({
-        schema: schema,
-        graphiql: true,
-    }))
+    app.use('/graphql', graphqlHTTP({ schema, graphiql: true }))
 
     return app;
 }
