@@ -1,26 +1,7 @@
-import express from 'express';
+import express, { Application } from 'express';
 import graphqlHTTP from 'express-graphql';
+import axios from 'axios';
 import { makeExecutableSchema } from 'graphql-tools';
-
-const citizens = [
-    {
-        name: 'dan',
-        reference: 'dan',
-        email: 'dan@dan.com',
-        permissions: [
-            { id: 'opt1', party: 'Me', data: 'Email', purpose: 'Newsletter', state: 'GRANTED' },
-        ]
-    },
-    {
-        name: 'dan2',
-        reference: 'dan2',
-        email: 'dan2@dan.com',
-        permissions: [
-            { id: 'opt1', party: 'Me', data: 'Email', purpose: 'Fundraising', state: 'DENIED' },
-            { id: 'opt1', party: 'Me', data: 'Email', purpose: 'Newsletter', state: 'GRANTED' },
-        ]
-    },
-];
 
 const typeDefs = `
     enum State {
@@ -36,12 +17,23 @@ const typeDefs = `
         state: State
     }
 
+    type Choice {
+        reference: String
+        label: String
+    }
+
+    type Preference {
+        reference: String
+        label: String
+        choices: [Choice]
+    }
+
     type Citizen {
+        id: String
         name: String
         email: String
         reference: String
-        permissions: [Permission]
-        permission (state: State!): [Permission]
+        preferences: [Preference]
     }
 
     type Query {
@@ -55,12 +47,46 @@ const typeDefs = `
 `
 
 interface Citizen {
+    id: string;
     reference: string;
     permissions: Permission[]
 }
 
+interface CitizenQueryParams {
+    reference: string;
+}
+
+interface PermissionsQueryParams {
+    state: State;
+}
+
 interface Permission {
     state: State;
+}
+
+interface AppConfig {
+    AUTH0_CLIENT_ID: string;
+    AUTH0_CLIENT_SECRET: string;
+    AUTH0_HOST: string;
+    AUTH0_AUDIENCE: string;
+    CONSENTRIC_HOST: string;
+}
+
+interface Auth0Config {
+    clientId: string;
+    clientSecret: string;
+    host: string;
+    audience: string;
+}
+
+interface AppContext {
+    req: Express.Request;
+    res: Express.Response;
+    config: AppConfig;
+}
+
+interface AppDependencies {
+    config: AppConfig;
 }
 
 enum State {
@@ -68,17 +94,101 @@ enum State {
     DENIED,
 }
 
+interface Locals {
+    access_token?: string;
+}
+
+declare global {
+    namespace Express {
+        interface Response {
+            locals: Locals;
+        }
+    }
+}
+
 const resolvers = {
     Query: {
-        citizens: () => citizens,
+        citizens: async (obj: any, args: any, { req, res, config }: AppContext) => {
+            try {
+                const { data } = await axios.get(`${config.CONSENTRIC_HOST}/v1/citizens`, {
+                    headers: {
+                        Authorization: `Bearer ${res.locals.access_token}`
+                    },
+                    params: {
+                        externalRef: 'dan',
+                        applicationId: 'jLBayYgGVuG',
+                    }
+                })
+
+                return data.map(({ applicationDetails }: any) => {
+                    return {
+                        email: applicationDetails[0].email,
+                        reference: applicationDetails[0].externalRef,
+                    };
+                });
+            } catch (e) {
+                if (e.response) {
+                    console.log(e.response.data);
+                }
+
+                console.log(e);
+            }
+        },
         
-        citizen: (_: any, { reference }: Citizen) =>
-            citizens.find(citizen => citizen.reference === reference)
+        citizen: async (_: any, { reference }: CitizenQueryParams, { res, config }: AppContext) => {
+            try {
+                const { data } = await axios.get(`${config.CONSENTRIC_HOST}/v1/citizens`, {
+                    headers: {
+                        Authorization: `Bearer ${res.locals.access_token}`
+                    },
+                    params: {
+                        externalRef: reference,
+                        applicationId: 'jLBayYgGVuG',
+                    }
+                })
+
+                return data.map(({ citizenId, applicationDetails }: any) => {
+                    return {
+                        id: citizenId,
+                        email: applicationDetails[0].email,
+                        reference: applicationDetails[0].externalRef,
+                    };
+                })[0];
+            } catch (e) {
+                if (e.response) {
+                    return console.log(e.response.data);
+                }
+
+                console.log(e);
+            }
+        }
+            
     },
 
     Citizen: {
-        permission: ({ permissions }: Citizen, { state }: Permission) =>
-            permissions.filter(permission => permission.state === state)
+        preferences: async ({ id }: Citizen, args: any, { res, config }: AppContext) => {
+            try {
+                const { data } = await axios.get(`${config.CONSENTRIC_HOST}/v1/preferences`, {
+                    headers: {
+                        Authorization: `Bearer ${res.locals.access_token}`
+                    },
+                    params: {
+                        citizenId: id,
+                        applicationId: 'jLBayYgGVuG',
+                    }
+                });
+
+                return data.preferences;
+            } catch (e) {
+                if (e.response) {
+                    return console.log(e.response.data);
+                }
+
+                console.log(e);
+            }
+        }
+        // permissions: ({ permissions }: Citizen, { state }: PermissionsQueryParams) =>
+        //     state ? permissions.filter(permission => permission.state === state) : permissions
     }
 }
 
@@ -87,10 +197,43 @@ const schema = makeExecutableSchema({
     resolvers,
 })
 
-export default async () => {
+const fetchAccessToken = ({ host, clientId, clientSecret, audience }: Auth0Config) => async (req: any, res: any, next: any) => {
+    try {
+        const { data } = await axios.post(`${host}/oauth/token`, {
+            grant_type: 'client_credentials',
+            client_id: clientId,
+            client_secret: clientSecret,
+            audience,
+            applicationId: 'jLBayYgGVuG',
+        })
+        
+        res.locals.access_token = data.access_token;
+
+        return next();
+    } catch (e) {
+        return next(e);
+    }
+}
+
+export default async ({ config }: AppDependencies): Promise<Application> => {
     const app = express();
 
-    app.use('/graphql', graphqlHTTP({ schema, graphiql: true }))
+    app.get(
+        '/graphql',
+
+        fetchAccessToken({
+            clientId: config.AUTH0_CLIENT_ID,
+            clientSecret: config.AUTH0_CLIENT_SECRET,
+            host: config.AUTH0_HOST,
+            audience: config.AUTH0_AUDIENCE,
+        }),
+
+        graphqlHTTP((req, res, params) => ({
+            schema,
+            graphiql: true,
+            context: { req, res, config },
+        }))
+    )
 
     return app;
 }
